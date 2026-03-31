@@ -12,14 +12,23 @@ from dataclasses import dataclass
 from enum import Enum
 
 from governance.audit import AuditTrail
-from governance.decisions import ActionResult, Decision, Proposal, Verdict
+from governance.decisions import AIDecisionRecord, ActionResult, Decision, Proposal, Verdict
 from governance.exceptions import (
     ForbiddenZoneError,
     HumanApprovalRequired,
+    MandatoryReviewRequired,
     NoRuleError,
     OwnershipError,
+    ReadinessGateCritical,
 )
+from governance.metrics import MetricsSnapshot, compute_metrics
 from governance.rules import RuleRegistry
+from governance.scoring import (
+    ReadinessGate,
+    ReadinessGateConfig,
+    ReadinessGateResult,
+    ReadinessStatus,
+)
 
 
 class Principle(Enum):
@@ -72,6 +81,8 @@ class GovernanceEngine:
     def __init__(self, registry: RuleRegistry | None = None) -> None:
         self.registry = registry or RuleRegistry()
         self.audit = AuditTrail()
+        self._readiness_gate: ReadinessGate | None = None
+        self._ai_records: list[AIDecisionRecord] = []
 
     def evaluate(self, proposal: Proposal) -> Decision:
         """Evaluate a proposal against all registered rules.
@@ -207,3 +218,108 @@ class GovernanceEngine:
         )
 
         return result
+
+    # --- AI Readiness Gate extensions ---
+
+    def enable_readiness_gate(
+        self, config: ReadinessGateConfig | None = None
+    ) -> None:
+        """Enable the AI Readiness Gate on this engine instance."""
+        self._readiness_gate = ReadinessGate(config=config)
+
+    def record_ai_decision(self, record: AIDecisionRecord) -> None:
+        """Record an AIDecisionRecord for scoring and metrics.
+
+        Also writes an audit entry with the AI decision context.
+        """
+        self._ai_records.append(record)
+        self.audit.append(
+            event_type="ai_decision",
+            actor=record.action_result.decision.proposal.proposed_by,
+            action=record.action_result.decision.proposal.action,
+            target=record.action_result.decision.proposal.target,
+            outcome="influenced" if record.influenced_decision else "overridden",
+            details={
+                "model_id": record.model_tracking.model_id,
+                "confidence": record.recommendation.confidence,
+                "reproducible": record.reproducible,
+                "override": record.was_overridden,
+                "override_reason": (
+                    record.human_decision.override_reason
+                    if record.human_decision
+                    else None
+                ),
+            },
+        )
+
+    def evaluate_readiness(
+        self,
+        baseline_impact: float,
+        previous_impact: float | None = None,
+        cycle_id: str = "",
+    ) -> ReadinessGateResult:
+        """Run the AI Readiness Gate on accumulated records.
+
+        Raises:
+            ReadinessGateCritical: If gate status is CRITICAL.
+            MandatoryReviewRequired: If continuity flag fires.
+            RuntimeError: If enable_readiness_gate() was not called first.
+        """
+        if self._readiness_gate is None:
+            msg = "Call enable_readiness_gate() before evaluate_readiness()."
+            raise RuntimeError(msg)
+
+        result = self._readiness_gate.evaluate(
+            records=tuple(self._ai_records),
+            baseline_impact=baseline_impact,
+            previous_impact=previous_impact,
+            cycle_id=cycle_id,
+        )
+
+        self.audit.append(
+            event_type="readiness_gate",
+            actor="governance_engine",
+            action="evaluate_readiness",
+            target="ai_system",
+            outcome=result.status.value,
+            details={
+                "cycle_id": cycle_id,
+                "passed_count": result.passed_count,
+                "continuity_flag": result.continuity_flag,
+                "recommended_action": result.recommended_action,
+                "tests": [
+                    {
+                        "name": t.name,
+                        "passed": t.passed,
+                        "value": t.measured_value,
+                    }
+                    for t in result.tests
+                ],
+            },
+        )
+
+        if result.continuity_flag:
+            raise MandatoryReviewRequired(
+                cycle_id=cycle_id,
+                reason="2 consecutive cycles with Impact<=0 or MarginalValue<=0.",
+                action="evaluate_readiness",
+            )
+        if result.status == ReadinessStatus.CRITICAL:
+            raise ReadinessGateCritical(
+                cycle_id=cycle_id,
+                passed_count=result.passed_count,
+                reason=f"Gate status CRITICAL: {result.passed_count}/4 tests passed.",
+                action="evaluate_readiness",
+            )
+        return result
+
+    def get_metrics(
+        self, baseline_values: tuple[float, ...] | None = None
+    ) -> MetricsSnapshot:
+        """Compute derived metrics from accumulated AI decision records."""
+        return compute_metrics(tuple(self._ai_records), baseline_values)
+
+    @property
+    def ai_records(self) -> tuple[AIDecisionRecord, ...]:
+        """Immutable view of accumulated AI decision records."""
+        return tuple(self._ai_records)

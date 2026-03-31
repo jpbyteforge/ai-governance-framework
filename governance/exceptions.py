@@ -93,3 +93,42 @@ class HumanApprovalRequired(GovernanceViolation):
             f"HumanApprovalRequired: action={self.action!r} requires human confirmation. "
             f"Reason: {self.reason!r}"
         )
+
+
+@dataclass(frozen=True)
+class ReadinessGateCritical(GovernanceViolation):
+    """Raised when the AI Readiness Gate enters CRITICAL status (<=2/4 tests passing).
+
+    Principle 9 — Evolution with Process: automatic downgrade when AI system
+    performance falls below minimum viability thresholds.
+    """
+
+    cycle_id: str = ""
+    passed_count: int = 0
+    principle: str = "evolution_with_process"
+
+    def __str__(self) -> str:
+        return (
+            f"ReadinessGateCritical[cycle={self.cycle_id!r}]: "
+            f"only {self.passed_count}/4 readiness tests passed. "
+            f"Automatic downgrade triggered. Reason: {self.reason!r}"
+        )
+
+
+@dataclass(frozen=True)
+class MandatoryReviewRequired(GovernanceViolation):
+    """Raised when 2 consecutive cycles have Impact<=0 or MarginalValue<=0.
+
+    Principle 9 — Evolution with Process: persistent underperformance requires
+    structured human review before the AI system may continue operating.
+    """
+
+    cycle_id: str = ""
+    principle: str = "evolution_with_process"
+
+    def __str__(self) -> str:
+        return (
+            f"MandatoryReviewRequired[cycle={self.cycle_id!r}]: "
+            f"2 consecutive cycles with failing impact/marginal value. "
+            f"Human review mandatory before resuming. Reason: {self.reason!r}"
+        )

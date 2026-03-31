@@ -198,3 +198,19 @@ class ForbiddenZoneEvaluator:
                     (f"Target {target!r} is in forbidden zone {zone!r}.",),
                 )
         return (Verdict.APPROVED, ("Target is not in a forbidden zone.",))
+
+
+def require_override_reason(proposal: Proposal) -> tuple[Verdict, tuple[str, ...]]:
+    """Principle 5 — Evidence, not persuasion: override reasons must be documented.
+
+    Prevents silent override — when a human overrides an AI recommendation
+    without documenting why, the feedback loop is corrupted.
+    """
+    is_override = proposal.metadata.get("override", False)
+    override_reason = proposal.metadata.get("override_reason", "")
+    if is_override and not override_reason:
+        return (
+            Verdict.DENIED,
+            ("Override requires a documented reason. Silent overrides violate Principle 5.",),
+        )
+    return (Verdict.APPROVED, ("Override reason verified.",))
